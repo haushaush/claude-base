@@ -131,6 +131,50 @@ class _Session:
     compact_defer_notified: bool = False
 
 
+def _available_mcp_servers(cwd: str) -> dict:
+    """Only wire up MCP servers whose binary actually exists.
+
+    The original setup installs dual-graph under $HOME via install.sh. In a
+    container that never ran, so referencing it unconditionally makes every
+    session start fail on a missing command. token-counter and posthog come
+    from the upstream author's setup and are opt-in here.
+    """
+    servers: dict = {}
+
+    dg = os.path.expanduser("~/.dual-graph/venv/bin/mcp-graph-server")
+    if os.path.exists(dg):
+        servers["dual-graph"] = {
+            "type": "stdio",
+            "command": dg,
+            "args": ["--stdio"],
+            "env": {
+                "DG_DATA_DIR": f"{cwd}/.dual-graph",
+                "DUAL_GRAPH_PROJECT_ROOT": cwd,
+            },
+        }
+    else:
+        logger.info("dual-graph not installed at %s — skipping that MCP server", dg)
+
+    if os.getenv("ENABLE_TOKEN_COUNTER") == "1":
+        servers["token-counter"] = {
+            "type": "stdio",
+            "command": "npx",
+            "args": ["-y", "token-counter-mcp@latest"],
+            "env": {},
+        }
+
+    if os.getenv("POSTHOG_MCP") == "1":
+        servers["posthog"] = {
+            "type": "http",
+            "url": "https://mcp.posthog.com/mcp",
+            "headers": {"x-posthog-mcp-consumer": "plugin"},
+        }
+
+    if not servers:
+        logger.info("no MCP servers configured — Claude runs with built-in tools only")
+    return servers
+
+
 class SessionManager:
     """Keeps one ClaudeSDKClient per Slack thread alive across messages."""
 
@@ -170,30 +214,7 @@ class SessionManager:
                 # inheriting every account/user server. strict drops the account
                 # connectors (Gmail/Calendar/Drive/Remote), appkittie and sentry:
                 # a single broken upstream tool schema otherwise 400s every turn.
-                mcp_servers={
-                    "dual-graph": {
-                        "type": "stdio",
-                        "command": os.path.expanduser(
-                            "~/.dual-graph/venv/bin/mcp-graph-server"
-                        ),
-                        "args": ["--stdio"],
-                        "env": {
-                            "DG_DATA_DIR": f"{self._cwd}/.dual-graph",
-                            "DUAL_GRAPH_PROJECT_ROOT": self._cwd,
-                        },
-                    },
-                    "token-counter": {
-                        "type": "stdio",
-                        "command": "npx",
-                        "args": ["-y", "token-counter-mcp@latest"],
-                        "env": {},
-                    },
-                    "posthog": {
-                        "type": "http",
-                        "url": "https://mcp.posthog.com/mcp",
-                        "headers": {"x-posthog-mcp-consumer": "plugin"},
-                    },
-                },
+                mcp_servers=_available_mcp_servers(self._cwd),
                 strict_mcp_config=True,
                 model=os.getenv("CLAUDE_MODEL", "claude-opus-5"),
             )
