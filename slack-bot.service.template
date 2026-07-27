@@ -1,0 +1,51 @@
+[Unit]
+Description=__PROJECT_NAME__ Slack Code Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__PROJECT_DIR__
+
+# Clean, explicit environment: systemd's minimal env guarantees no CLAUDE_* vars
+# from a parent Claude session leak into the bot and silently change the
+# behavior of the Claude Agent SDK sessions it spawns.
+Environment=HOME=__HOME__
+# ~/.local/bin first so the newest claude CLI (symlinked there) wins over /usr/bin/claude.
+Environment=PATH=__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=LANG=C.UTF-8
+Environment=PYTHONUTF8=1
+Environment=PYTHONUNBUFFERED=1
+# Start without the compression proxy; flip to 0 once the bot runs clean.
+Environment=HEADROOM_DISABLE=1
+# Overrides the model pinned in claude_session.py without touching code.
+Environment=CLAUDE_MODEL=claude-opus-5
+
+# Slack tokens + allowlist come from slack_bot/.credentials.json (chmod 600).
+# Claude CLI auth comes from ~/.claude.json under HOME — no API key here.
+# If ANTHROPIC_API_KEY is set anywhere in this environment it WINS over the
+# subscription login. Leave it unset unless that is what you want.
+
+ExecStart=__PROJECT_DIR__/.venv/bin/python -m slack_bot.bot
+
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# --- Hardening --------------------------------------------------------------
+# The bot runs arbitrary shell commands by design, so these are a speed bump,
+# not a sandbox. ReadWritePaths must cover the project dir AND $HOME, because
+# the Claude CLI writes session state under ~/.claude.
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

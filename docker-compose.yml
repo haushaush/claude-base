@@ -1,0 +1,84 @@
+# Deliberately its own Compose project, separate from the n8n stack in /root.
+# Same host, no shared network, no shared volumes, no docker socket — the bot
+# and n8n are neighbours, not roommates.
+#
+#   cd /opt/claude-bot && docker compose up -d --build
+#
+# Keeping it out of /root/docker-compose.yml also means a Hostinger n8n
+# template update can't clobber it.
+
+services:
+  claude-slack-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: claude-slack-bot
+    restart: unless-stopped
+
+    # Socket Mode dials OUT. No ports published, nothing for Traefik to route,
+    # nothing reachable from the internet. This stays empty on purpose.
+    # ports: []
+
+    environment:
+      # Where Claude actually works. MUST be set — without it the bot would
+      # derive its workdir from the module path and operate on its own source.
+      CLAUDE_WORKDIR: /workspace
+      # Overrides the model pinned in claude_session.py.
+      CLAUDE_MODEL: claude-opus-5
+      # Start without the compression proxy; flip to 0 once the bot runs clean.
+      HEADROOM_DISABLE: "1"
+      PYTHONUNBUFFERED: "1"
+      PYTHONUTF8: "1"
+      LANG: C.UTF-8
+      # Optional: channel ID for the "· online" restart notice.
+      # SLACK_BROADCAST_CHANNEL: C01ABCDEF
+      #
+      # Do NOT set ANTHROPIC_API_KEY here unless you deliberately want to bill
+      # against Claude Platform instead of the subscription login. If it is
+      # set, it wins over the login in ~/.claude.json.
+
+    volumes:
+      # Claude CLI auth + session state. Named volume so a rebuild doesn't log
+      # you out.
+      - claude_home:/home/node
+      # What the agent works on. Bind mount so you can read, diff and commit
+      # its output from the host.
+      - ./workspace:/workspace
+      # Slack tokens + allowlist, read-only. Created by bootstrap.sh.
+      # If this file does not exist, Docker silently creates a DIRECTORY with
+      # that name and the bot fails with a confusing error — run bootstrap.sh
+      # first.
+      - ./credentials.json:/app/slack_bot/.credentials.json:ro
+
+    # --- Resource caps -------------------------------------------------------
+    # Tune to the box. n8n + Traefik take ~600 MB; leave the host ~1 GB.
+    #   4 GB host  -> mem_limit 2g,  cpus 1.5
+    #   8 GB host  -> mem_limit 4g,  cpus 2.5
+    #  16 GB host  -> mem_limit 8g,  cpus (all but one core)
+    mem_limit: 2g
+    memswap_limit: 2g
+    cpus: 1.5
+
+    # Long agent runs produce a lot of log. Without rotation the json driver
+    # grows until the disk is full — which would take n8n down with it.
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+    # A runaway loop in a Bash tool call can otherwise fork until the whole
+    # host is unresponsive.
+    pids_limit: 512
+
+    security_opt:
+      - no-new-privileges:true
+
+    # NOT PRESENT, and that is the point:
+    #   /var/run/docker.sock  -> root-equivalent on the host, would hand the
+    #                            agent n8n's volumes
+    #   network_mode: host    -> would put it on n8n's network
+    #   privileged: true
+
+volumes:
+  claude_home:

@@ -1,0 +1,60 @@
+display_information:
+  name: Claude Code
+  description: Claude Agent mit vollem Tool-Zugriff auf dem Projekt-Server
+  background_color: "#1f1f1c"
+  long_description: >-
+    Verbindet einen Slack-Thread mit einer Claude-Code-Session auf dem
+    Projekt-Server. Jeder Thread ist eine eigene Session mit eigenem Kontext.
+    Der Bot fuehrt Shell-Kommandos aus und bearbeitet Dateien — Zugriff ist
+    auf eine feste Liste von Usern und Channels beschraenkt.
+
+features:
+  bot_user:
+    display_name: Claude Code
+    always_online: true
+
+  slash_commands:
+    # Socket Mode liefert Slash-Commands ueber die WebSocket-Verbindung.
+    # Deshalb hier KEINE url — Slack braucht keinen erreichbaren Endpoint.
+    - command: /claude-help
+      description: Kurzhilfe zum Bot
+      should_escape: false
+    - command: /claude-plan
+      description: Plan-Mode an — Claude plant, fuehrt aber nichts aus
+      should_escape: false
+    - command: /claude-exitplan
+      description: Plan-Mode aus
+      should_escape: false
+    - command: /claude-reset
+      description: Session im aktuellen Thread verwerfen
+      should_escape: false
+    - command: /claude-status
+      description: Aktive Sessions anzeigen
+      should_escape: false
+
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read      # @Claude Code in Channels
+      - chat:write             # Antworten posten und editieren
+      - chat:write.public      # in Channels posten, in denen der Bot nicht Member ist
+      - commands               # Slash-Commands
+      - files:read             # Anhaenge herunterladen
+      - groups:history         # Thread-Follow-ups in PRIVATEN Channels
+      - channels:history       # Thread-Follow-ups in oeffentlichen Channels
+      - im:history             # DMs lesen
+      - im:read
+      - im:write               # DMs beantworten
+      - reactions:write        # Sanduhr / Haken als Typing-Ersatz
+
+settings:
+  event_subscriptions:
+    bot_events:
+      - app_mention
+      - message.im
+      - message.groups
+      - message.channels
+  interactivity:
+    is_enabled: true
+  socket_mode_enabled: true
+  token_rotation_enabled: false
