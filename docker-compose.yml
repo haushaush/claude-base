@@ -20,6 +20,8 @@ services:
     # ports: []
 
     environment:
+      # Auf "1" setzen, um jedes eingehende Slack-Payload zu loggen.
+      SLACK_DEBUG: "0"
       # Where Claude actually works. MUST be set — without it the bot would
       # derive its workdir from the module path and operate on its own source.
       CLAUDE_WORKDIR: /workspace
@@ -44,6 +46,10 @@ services:
       # What the agent works on. Bind mount so you can read, diff and commit
       # its output from the host.
       - ./workspace:/workspace
+      # Orchestrierungs-Subagents (Explore/verify/implement/codex-implementer).
+      # ~/.claude/agents liegt im claude_home-Volume, laesst sich also nicht ins
+      # Image backen. Docker sortiert Mounts nach Pfadtiefe — der Bind gewinnt.
+      - ./claude-agents:/home/node/.claude/agents:ro
       # Slack tokens + allowlist, read-only. Created by bootstrap.sh.
       # If this file does not exist, Docker silently creates a DIRECTORY with
       # that name and the bot fails with a confusing error — run bootstrap.sh
