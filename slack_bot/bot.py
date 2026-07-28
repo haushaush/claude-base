@@ -32,6 +32,7 @@ from slack_sdk.errors import SlackApiError
 from slack_bot import headroom
 from slack_bot.auth import is_authorized, is_bot_event, require_auth
 from slack_bot import slack_blocks
+from slack_bot.block_layout import md_to_blocks as slack_blocks_layout
 from slack_bot.claude_session import SessionManager, StreamEvent
 from slack_bot.config import (
     DEFAULT_WORKDIR,
@@ -214,7 +215,7 @@ async def _flush_body(client, state: ReplyState, done: bool, force: bool = False
     while len(body_md) > SAFE_MD_CAP:
         cut = find_split_point(body_md, SAFE_MD_CAP)
         head = body_md[:cut].strip()
-        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": _md(head)}}]
+        blocks = slack_blocks_layout(head)
         if state.body_ts is None:
             state.body_ts = await _post(client, state.channel, state.thread_ts, blocks, head[:120])
             state.body_msgs_sent += 1

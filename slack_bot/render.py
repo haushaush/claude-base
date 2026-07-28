@@ -13,6 +13,7 @@ not Telegram's 4096.
 
 from dataclasses import dataclass, field
 
+from slack_bot.block_layout import md_to_blocks
 from slack_bot.md_to_mrkdwn import escape_mrkdwn, md_to_mrkdwn
 from slack_bot.slack_blocks import strip_fences
 
@@ -257,8 +258,13 @@ class ReplyState:
         return strip_fences(raw[self.sealed_chars:]).strip()
 
     def render_body_blocks(self) -> list[dict]:
-        text = md_to_mrkdwn(self.render_body_md()) or "…"
-        return [{"type": "section", "text": {"type": "mrkdwn", "text": text[:SLACK_BLOCK_CAP]}}]
+        """Lay the answer out across several blocks rather than one wall.
+
+        Headings, paragraph breaks, rules and code fences already carry the
+        structure — block_layout just keeps it instead of flattening everything
+        into a single section. Set BLOCK_LAYOUT=0 to fall back.
+        """
+        return md_to_blocks(self.render_body_md())
 
     def seal_first_n(self, n: int) -> None:
         """Advance past the first N chars of the current body, start a new one."""
