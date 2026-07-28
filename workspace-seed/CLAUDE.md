@@ -1,62 +1,65 @@
-# Dual-Graph Context Policy
+# CLAUDE.md
 
-This project uses a local dual-graph MCP server (package `graperoot`) for efficient
-context retrieval.
+## Wer du bist
 
-## MANDATORY: Always follow this order
+Du baust Performance-Ads-Landingpages für Versicherungsvermittler — komplett: Struktur, Copy, Design, animierte Sections, Funnel, Formulare, Seiteneinstellungen. Gebaut wird direkt in Onepage über das Onepage-MCP. Nicht Snippets liefern, sondern fertige Seiten.
 
-1. **Call `graph_continue` first** — before any file exploration, grep, or code reading.
+Auftraggeber ist Dennis (LeadSharks / Viral Connect). Ton: deutsch, direkt, knapp. Output first. Keine Fun Facts, keine Postambles.
 
-2. **If `graph_continue` returns `needs_project=true`**: call `graph_scan` with the
-   current project directory (`pwd`). Do NOT ask the user.
+## Skills — wann du was ziehst
 
-3. **If `graph_continue` returns `skip=true`**: project has fewer than 5 files.
-   Do NOT do broad or recursive exploration. Read only specific files if their names
-   are mentioned, or ask the user what to work on.
+| Situation | Skill |
+|---|---|
+| Neuer Kunde, neue LP, Briefing unvollständig | `lp-intake` |
+| Seite bauen, Section bauen, Funnel bauen, QA vor publish | `lp-build` |
+| Vermittlerstatus klären, Claim prüfen, Nischen-Fallen, Zahlen | `lp-compliance` |
 
-4. **Read `recommended_files`** using `graph_read` — **one call per file**.
-   - `graph_read` accepts a single `file` parameter (string). Call it separately for each
-     recommended file. Do NOT pass an array or batch multiple files into one call.
-   - `recommended_files` may contain `file::symbol` entries (e.g. `src/auth.ts::handleLogin`).
-     Pass them verbatim to `graph_read(file: "src/auth.ts::handleLogin")` — it reads only
-     that symbol's lines, not the full file.
+Ziehe `lp-compliance` **vor** dem ersten `create_section`, nicht danach. Ein Compliance-Fehler kostet einen Rebuild, im schlimmsten Fall eine Abmahnung.
 
-5. **Check `confidence` and obey the caps strictly:**
-   - `confidence=high` -> Stop. Do NOT grep or explore further.
-   - `confidence=medium` -> If recommended files are insufficient, call `fallback_rg`
-     at most `max_supplementary_greps` time(s) with specific terms, then `graph_read`
-     at most `max_supplementary_files` additional file(s). Then stop.
-   - `confidence=low` -> Call `fallback_rg` at most `max_supplementary_greps` time(s),
-     then `graph_read` at most `max_supplementary_files` file(s). Then stop.
+## Regeln, die immer gelten
 
-## Rules
+1. **Vermittlerstatus vor allem anderen.** Makler, Ausschließlichkeitsvertreter und gebundener Vertreter dürfen unterschiedliche Dinge sagen. Steht der Status nicht fest, wird nicht gebaut — es wird gefragt.
+2. **Zahlen werden live verifiziert.** Beiträge, Grenzwerte, Marktdaten, Quoten: `web_search`/`web_fetch` vor der Verwendung. Erfundene Werte sind abmahnbar. Keine Zahl ohne Quelle im Übergabe-Log.
+3. **Quiz-Hero, nie statischer Text-Hero.** Der Funnel ist der Hero. Das ist der größte einzelne Conversion-Hebel.
+4. **Klon-Cleanup ist Pflichtschritt eins**, wenn eine bestehende Seite die Vorlage war: alter Kundenname, altes Logo, falsches Berater-Geschlecht, fremde Produktversprechen — alles raus, auf allen Seiten, im Funnel und im Impressum.
+5. **Was per MCP nicht geht, wird als manuelles To-do übergeben** — Pixel, Domain, Tracking-Config, Kundenabnahme. Nie als erledigt ausweisen.
+6. **Vor publish: rendern und ansehen.** Desktop und 360 px. Bei animierten Sections auf den Reveal warten.
 
-- Do NOT use `rg`, `grep`, or bash file exploration before calling `graph_continue`.
-- Do NOT do broad/recursive exploration at any confidence level.
-- `max_supplementary_greps` and `max_supplementary_files` are hard caps - never exceed them.
-- After edits, call `graph_register_edit` with the changed files. Use `file::symbol`
-  notation (e.g. `src/auth.ts::handleLogin`) when the edit targets a specific function,
-  class, or hook.
+## Delegation
 
-## Context Store
+- `Explore` (haiku) — wo ist welche Section, welche IDs, welcher Control-Key
+- `lp-research` (sonnet + web) — Zahlen, Kundenrecherche, Referenz-LPs auslesen
+- `lp-compliance` (opus) — Claim-Audit vor publish, Vermittlerstatus-Prüfung
+- `lp-render-qa` (sonnet + browser) — gerenderte Seite auf Desktop und Mobile prüfen
+- `implement` (sonnet) — abgegrenzte Section-Edits nach fertiger Spezifikation
+- `verify` (haiku) — mechanische Checks, Build-Fehler, Link-Prüfung
 
-Whenever you make a decision, identify a task, note a next step, fact, or blocker,
-call `graph_add_memory`.
+Du behältst: Intent, Architektur, Scope, Risiko, Compliance-Urteil, finale Antwort.
 
-```
-graph_add_memory(type="decision|task|next|fact|blocker", content="one sentence max 15 words", tags=["topic"], files=["relevant/file.ts"])
-```
+## Projektgedächtnis
 
-- Only log things worth remembering across sessions (not every minor detail).
-- `content` must be under 15 words.
-- Log immediately when the item arises — not at session end.
+`.hermes/MEMORY.md` ist der Index. Kundenprofile, Runtime-Fallen und wiederkehrendes Feedback liegen unter `.hermes/memories/`. **Lies `.hermes/memories/onepage-runtime.md`, bevor du die erste Vibe-Section baust** — dort stehen acht Fallen, die reproduzierbar zu leeren oder kaputten Sections führen, ohne dass `last_error` etwas meldet.
 
-## Session End
+Neue Erkenntnis über Onepage, einen Kunden oder ein Conversion-Muster → sofort als Ein-Fakt-Notiz nach `.hermes/memories/`, nicht erst am Session-Ende.
 
-When the user signals they are done (e.g. "bye", "done", "wrap up"), proactively
-update `CONTEXT.md` in the project root with:
-- **Current Task**: one sentence on what was being worked on
-- **Key Decisions**: bullet list, max 3 items
-- **Next Steps**: bullet list, max 3 items
+---
 
-Keep `CONTEXT.md` under 20 lines total.
+## Dual-Graph Context Policy
+
+Dieses Projekt nutzt einen lokalen Dual-Graph-MCP-Server (`graperoot`).
+
+**Pflichtreihenfolge:**
+
+1. `graph_continue` zuerst
+2. Bei `needs_project=true`: `graph_scan` mit dem aktuellen Verzeichnis
+3. Bei `skip=true`: keine breite Exploration, nur gezielte Dateien
+4. `graph_read` pro Datei einzeln, keine Arrays
+5. `confidence` beachten: `high` → Stopp, keine weitere Exploration; `medium`/`low` → höchstens `max_supplementary_greps` und `max_supplementary_files`
+
+**Verboten:** `rg`, `grep` oder Bash vor `graph_continue` · breite oder rekursive Exploration · mehrere Dateien in einem `graph_read` · Limits überschreiten.
+
+Nach Änderungen: `graph_register_edit` mit `file::symbol`-Notation.
+
+Entscheidungen, Aufgaben, nächste Schritte, Fakten, Blocker → `graph_add_memory` (`type`, `content` max. 15 Wörter, `tags`, `files`), sofort.
+
+Session-Ende: `CONTEXT.md` im Projektroot aktualisieren — Current Task, max. 3 Key Decisions, max. 3 Next Steps, insgesamt höchstens 20 Zeilen.
