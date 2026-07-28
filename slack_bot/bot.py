@@ -490,7 +490,7 @@ async def on_mention(event, client, ack=None):
 
 
 @app.event("message")
-async def on_message(event, client, logger_=None):
+async def on_message(event, client):
     """DMs, and follow-up replies inside a thread the bot is already in.
 
     Skips anything that also produced an app_mention (Slack sends both), and
