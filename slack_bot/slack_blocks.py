@@ -25,10 +25,21 @@ import re
 
 logger = logging.getLogger(__name__)
 
-# A complete fence. Non-greedy so several in one answer stay separate.
+# The documented fence.
 FENCE_RE = re.compile(r"```slack-blocks[ \t]*\n(.*?)\n?```", re.DOTALL)
 # An opening fence with no closing one yet — mid-stream.
 OPEN_FENCE_RE = re.compile(r"```slack-blocks[ \t]*\n")
+# Fallback: models reach for ```json out of habit even when told otherwise.
+# Only treated as a payload if the content actually *looks* like Block Kit —
+# see _looks_like_blocks. A JSON snippet the user asked for must stay text.
+JSON_FENCE_RE = re.compile(r"```(?:json)?[ \t]*\n(.*?)\n?```", re.DOTALL)
+
+# Block types Slack knows. Used both for validation and for recognising an
+# untagged payload.
+KNOWN_TYPES = {
+    "section", "divider", "header", "context", "actions", "rich_text", "image",
+    "input", "file", "video",
+}
 
 # Slack's limits. Exceeding any of them makes the whole chat.postMessage fail,
 # so we check here and fall back rather than losing the message.
@@ -45,16 +56,65 @@ ALLOWED_TYPES = {
 }
 
 
-def strip_fences(text: str) -> str:
-    """Remove block fences from text meant for display.
+def _looks_like_blocks(parsed) -> list | None:
+    """Is this parsed JSON a Block Kit payload? Return the block list if so.
 
-    Complete fences vanish entirely — their content becomes a separate Block
-    Kit message. An *incomplete* fence truncates the rest, so the user never
+    Deliberately strict. An untagged ```json fence is only claimed when every
+    entry is a dict carrying a known Slack block ``type`` — otherwise a user
+    asking "show me that config as JSON" would watch their answer get eaten.
+    """
+    if isinstance(parsed, dict) and isinstance(parsed.get("blocks"), list):
+        parsed = parsed["blocks"]
+    if not isinstance(parsed, list) or not parsed:
+        return None
+    if all(isinstance(b, dict) and b.get("type") in KNOWN_TYPES for b in parsed):
+        return parsed
+    return None
+
+
+def _payload_spans(text: str) -> list[tuple[int, int, list[dict]]]:
+    """Find every Block Kit payload with its position in the text."""
+    spans: list[tuple[int, int, list[dict]]] = []
+    claimed: list[tuple[int, int]] = []
+
+    def scan(pattern, tagged: bool):
+        for m in pattern.finditer(text):
+            if any(s <= m.start() < e for s, e in claimed):
+                continue
+            raw = (m.group(1) or "").strip()
+            if not raw:
+                continue
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as e:
+                if tagged:
+                    logger.warning("slack-blocks fence is not valid JSON: %s", e)
+                continue
+            blocks = _looks_like_blocks(parsed)
+            if blocks is None:
+                if tagged:
+                    logger.warning("slack-blocks fence is not a block list")
+                continue
+            cleaned = _validate(blocks)
+            if cleaned:
+                spans.append((m.start(), m.end(), cleaned))
+                claimed.append((m.start(), m.end()))
+
+    scan(FENCE_RE, tagged=True)
+    scan(JSON_FENCE_RE, tagged=False)
+    spans.sort(key=lambda t: t[0])
+    return spans
+
+
+def strip_fences(text: str) -> str:
+    """Remove block payloads from text meant for display.
+
+    Complete payloads vanish — their content becomes a separate Block Kit
+    message. An *incomplete* tagged fence truncates the rest, so the user never
     watches raw JSON assemble itself character by character.
     """
-    if "```slack-blocks" not in text:
-        return text
-    text = FENCE_RE.sub("", text)
+    for start, end, _ in reversed(_payload_spans(text)):
+        text = text[:start] + text[end:]
     m = OPEN_FENCE_RE.search(text)
     if m:
         text = text[: m.start()]
@@ -63,27 +123,7 @@ def strip_fences(text: str) -> str:
 
 def extract(text: str) -> list[list[dict]]:
     """Return every valid block payload found in the text, in order."""
-    payloads: list[list[dict]] = []
-    for m in FENCE_RE.finditer(text):
-        raw = m.group(1).strip()
-        if not raw:
-            continue
-        try:
-            parsed = json.loads(raw)
-        except json.JSONDecodeError as e:
-            logger.warning("slack-blocks fence is not valid JSON: %s", e)
-            continue
-        # Accept both a bare array and {"blocks": [...]} — models produce both
-        # and rejecting one of them for no reason just costs a retry.
-        if isinstance(parsed, dict) and isinstance(parsed.get("blocks"), list):
-            parsed = parsed["blocks"]
-        if not isinstance(parsed, list):
-            logger.warning("slack-blocks fence is not a list: %r", type(parsed))
-            continue
-        cleaned = _validate(parsed)
-        if cleaned:
-            payloads.append(cleaned)
-    return payloads
+    return [blocks for _, _, blocks in _payload_spans(text)]
 
 
 def _validate(blocks: list) -> list[dict]:
