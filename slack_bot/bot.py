@@ -20,6 +20,7 @@ Port of the Telegram bot. What changed and why:
 import asyncio
 import logging
 import os
+import re
 import time
 from collections import OrderedDict
 
@@ -30,6 +31,7 @@ from slack_sdk.errors import SlackApiError
 
 from slack_bot import headroom
 from slack_bot.auth import is_authorized, is_bot_event, require_auth
+from slack_bot import slack_blocks
 from slack_bot.claude_session import SessionManager, StreamEvent
 from slack_bot.config import (
     DEFAULT_WORKDIR,
@@ -242,9 +244,31 @@ def _md(text: str) -> str:
     return md_to_mrkdwn(text)[:2900] or "…"
 
 
+async def _post_block_payloads(client, state: ReplyState) -> int:
+    """Post any Block Kit payloads Claude embedded, as separate messages.
+
+    Separate rather than merged into the answer body: a payload can carry
+    interactive elements, and mixing those into a message that is still being
+    edited invites races between chat.update and a user's click.
+    """
+    payloads = slack_blocks.extract(state.raw_text())
+    for blocks in payloads:
+        try:
+            await _post(
+                client, state.channel, state.thread_ts,
+                blocks, slack_blocks.fallback_text(blocks),
+            )
+        except Exception:
+            logger.warning("posting block payload failed", exc_info=True)
+    return len(payloads)
+
+
 async def _finalize(client, state: ReplyState) -> None:
     await _flush_body(client, state, done=True, force=True)
     await _flush_tool(client, state, done=True, force=True)
+    posted = await _post_block_payloads(client, state)
+    if posted:
+        logger.info("posted %d Block Kit payload(s)", posted)
     # No tools fired and we have a body: the "🔄 Arbeite…" placeholder is noise.
     if state.tool_ts and not state.tool_calls and state.body_ts:
         try:
@@ -540,6 +564,55 @@ async def cmd_status(ack, command, client):
         channel=command["channel_id"],
         user=command["user_id"],
         text="*Aktive Sessions*\n" + "\n".join(lines),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Block Kit interactions
+#
+# A button in a payload is dead weight without this: Slack expects an ack
+# within 3 seconds and shows the user a warning otherwise. The click is fed
+# back into the same thread as a normal prompt, so the session continues where
+# the buttons were offered.
+# ---------------------------------------------------------------------------
+
+
+@app.action(re.compile(r".*"))
+async def on_block_action(ack, body, client):
+    await ack()
+
+    user = (body.get("user") or {}).get("id")
+    channel = (body.get("channel") or {}).get("id")
+    if not is_authorized(user, channel):
+        logger.warning("rejected block action from user=%s channel=%s", user, channel)
+        return
+
+    msg = body.get("message") or {}
+    thread_ts = msg.get("thread_ts") or msg.get("ts")
+    if not thread_ts:
+        return
+
+    action = (body.get("actions") or [{}])[0]
+    value = (
+        action.get("value")
+        or (action.get("selected_option") or {}).get("value")
+        or (action.get("selected_options") and action["selected_options"][0].get("value"))
+        or action.get("action_id")
+        or ""
+    )
+    if not value:
+        return
+
+    # Echo the choice so the thread stays readable — otherwise a click leaves
+    # no trace and the next answer looks like it came from nowhere.
+    ts = await _post(
+        client, channel, thread_ts,
+        [{"type": "context", "elements": [
+            {"type": "mrkdwn", "text": f"<@{user}> wählte *{value}*"}]}],
+        value[:120],
+    )
+    asyncio.create_task(
+        _dispatch(client, channel, thread_ts, ts or thread_ts, value)
     )
 
 
