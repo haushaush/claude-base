@@ -131,6 +131,31 @@ class _Session:
     compact_defer_notified: bool = False
 
 
+# The SDK talks to the `claude` CLI over stdio with a 1 MiB cap per JSON
+# message. A base64-encoded screenshot blows straight through that and kills
+# the reader loop mid-turn. Raise it where the installed SDK allows — the
+# option is not in every version, so the field is probed rather than assumed.
+_MAX_BUFFER = int(os.getenv("SDK_MAX_BUFFER", str(32 * 1024 * 1024)))
+
+
+def _buffer_kwargs() -> dict:
+    try:
+        import dataclasses
+
+        names = {f.name for f in dataclasses.fields(ClaudeAgentOptions)}
+    except Exception:
+        return {}
+    for candidate in ("max_buffer_size", "maxBufferSize", "stdout_buffer_size"):
+        if candidate in names:
+            return {candidate: _MAX_BUFFER}
+    logger.warning(
+        "Installed claude-agent-sdk has no buffer-size option — large images "
+        "may still break the reader loop. Image downscaling in bot.py is the "
+        "fallback."
+    )
+    return {}
+
+
 def _available_mcp_servers(cwd: str) -> dict:
     """Only wire up MCP servers whose binary actually exists.
 
@@ -217,6 +242,7 @@ class SessionManager:
                 # connectors (Gmail/Calendar/Drive/Remote), appkittie and sentry:
                 # a single broken upstream tool schema otherwise 400s every turn.
                 mcp_servers=_available_mcp_servers(self._cwd),
+                **_buffer_kwargs(),
                 strict_mcp_config=True,
                 model=os.getenv("CLAUDE_MODEL", "claude-opus-5"),
             )

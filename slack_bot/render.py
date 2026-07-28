@@ -13,7 +13,9 @@ not Telegram's 4096.
 
 from dataclasses import dataclass, field
 
+from slack_bot.block_layout import md_to_blocks
 from slack_bot.md_to_mrkdwn import escape_mrkdwn, md_to_mrkdwn
+from slack_bot.slack_blocks import strip_fences
 
 # Slack: 3000 chars per section block. Leave headroom for mrkdwn expansion
 # (escaping &<> grows the string) and for the trailing ellipsis on rollover.
@@ -241,14 +243,28 @@ class ReplyState:
             return [{"type": "context", "elements": [{"type": "mrkdwn", "text": text}]}]
         return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
 
+    def raw_text(self) -> str:
+        """Everything Claude has emitted this turn, fences included."""
+        return "".join(self.text_parts)
+
     def render_body_md(self) -> str:
-        """Markdown of the *unsealed* tail — what belongs in the current body."""
+        """Markdown of the *unsealed* tail — what belongs in the current body.
+
+        Block Kit fences are stripped here: complete ones become a separate
+        message at finalize, and an incomplete one truncates the tail so the
+        user never watches raw JSON assemble itself.
+        """
         raw = "".join(self.text_parts)
-        return raw[self.sealed_chars:].strip()
+        return strip_fences(raw[self.sealed_chars:]).strip()
 
     def render_body_blocks(self) -> list[dict]:
-        text = md_to_mrkdwn(self.render_body_md()) or "…"
-        return [{"type": "section", "text": {"type": "mrkdwn", "text": text[:SLACK_BLOCK_CAP]}}]
+        """Lay the answer out across several blocks rather than one wall.
+
+        Headings, paragraph breaks, rules and code fences already carry the
+        structure — block_layout just keeps it instead of flattening everything
+        into a single section. Set BLOCK_LAYOUT=0 to fall back.
+        """
+        return md_to_blocks(self.render_body_md())
 
     def seal_first_n(self, n: int) -> None:
         """Advance past the first N chars of the current body, start a new one."""

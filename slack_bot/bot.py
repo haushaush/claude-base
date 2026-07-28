@@ -20,6 +20,7 @@ Port of the Telegram bot. What changed and why:
 import asyncio
 import logging
 import os
+import re
 import time
 from collections import OrderedDict
 
@@ -30,6 +31,8 @@ from slack_sdk.errors import SlackApiError
 
 from slack_bot import headroom
 from slack_bot.auth import is_authorized, is_bot_event, require_auth
+from slack_bot import slack_blocks
+from slack_bot.block_layout import md_to_blocks as slack_blocks_layout
 from slack_bot.claude_session import SessionManager, StreamEvent
 from slack_bot.config import (
     DEFAULT_WORKDIR,
@@ -212,7 +215,7 @@ async def _flush_body(client, state: ReplyState, done: bool, force: bool = False
     while len(body_md) > SAFE_MD_CAP:
         cut = find_split_point(body_md, SAFE_MD_CAP)
         head = body_md[:cut].strip()
-        blocks = [{"type": "section", "text": {"type": "mrkdwn", "text": _md(head)}}]
+        blocks = slack_blocks_layout(head)
         if state.body_ts is None:
             state.body_ts = await _post(client, state.channel, state.thread_ts, blocks, head[:120])
             state.body_msgs_sent += 1
@@ -242,9 +245,31 @@ def _md(text: str) -> str:
     return md_to_mrkdwn(text)[:2900] or "…"
 
 
+async def _post_block_payloads(client, state: ReplyState) -> int:
+    """Post any Block Kit payloads Claude embedded, as separate messages.
+
+    Separate rather than merged into the answer body: a payload can carry
+    interactive elements, and mixing those into a message that is still being
+    edited invites races between chat.update and a user's click.
+    """
+    payloads = slack_blocks.extract(state.raw_text())
+    for blocks in payloads:
+        try:
+            await _post(
+                client, state.channel, state.thread_ts,
+                blocks, slack_blocks.fallback_text(blocks),
+            )
+        except Exception:
+            logger.warning("posting block payload failed", exc_info=True)
+    return len(payloads)
+
+
 async def _finalize(client, state: ReplyState) -> None:
     await _flush_body(client, state, done=True, force=True)
     await _flush_tool(client, state, done=True, force=True)
+    posted = await _post_block_payloads(client, state)
+    if posted:
+        logger.info("posted %d Block Kit payload(s)", posted)
     # No tools fired and we have a body: the "🔄 Arbeite…" placeholder is noise.
     if state.tool_ts and not state.tool_calls and state.body_ts:
         try:
@@ -313,6 +338,67 @@ async def _dispatch(client, channel: str, thread_ts: str, user_ts: str, prompt: 
 # ---------------------------------------------------------------------------
 
 
+# Slack screenshots are routinely 2560px wide. Base64-encoded, such a file
+# alone exceeds the SDK's stdio message cap and kills the session — and even
+# when it fits, Claude downscales anything past ~1568px internally, so the
+# extra pixels buy nothing and cost image tokens. Shrink on the way in.
+IMAGE_MAX_EDGE = int(os.environ.get("IMAGE_MAX_EDGE", "1568"))
+IMAGE_MAX_BYTES = int(os.environ.get("IMAGE_MAX_BYTES", str(700 * 1024)))
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+
+
+def _shrink_image(path: str) -> str:
+    """Downscale an image in place. Returns the path to hand to Claude.
+
+    Failure is never fatal: if Pillow is missing or the file is not an image,
+    the original path comes back unchanged and the turn continues.
+    """
+    if os.path.splitext(path)[1].lower() not in _IMAGE_SUFFIXES:
+        return path
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.info("Pillow not installed — image passed through at full size")
+        return path
+
+    try:
+        with Image.open(path) as im:
+            im.load()
+            if getattr(im, "is_animated", False):
+                return path  # leave GIFs alone rather than flattening them
+
+            longest = max(im.size)
+            if longest > IMAGE_MAX_EDGE:
+                ratio = IMAGE_MAX_EDGE / longest
+                im = im.resize(
+                    (max(1, int(im.width * ratio)), max(1, int(im.height * ratio))),
+                    Image.LANCZOS,
+                )
+
+            out = os.path.splitext(path)[0] + "_small.png"
+            im.convert("RGBA" if im.mode in ("RGBA", "LA", "P") else "RGB").save(
+                out, "PNG", optimize=True
+            )
+
+            # Screenshots of text stay legible as JPEG and shrink a lot more.
+            if os.path.getsize(out) > IMAGE_MAX_BYTES:
+                jpg = os.path.splitext(path)[0] + "_small.jpg"
+                im.convert("RGB").save(jpg, "JPEG", quality=85, optimize=True)
+                if os.path.getsize(jpg) < os.path.getsize(out):
+                    os.remove(out)
+                    out = jpg
+
+        logger.info(
+            "image %s: %d KiB -> %s %d KiB",
+            os.path.basename(path), os.path.getsize(path) // 1024,
+            os.path.basename(out), os.path.getsize(out) // 1024,
+        )
+        return out
+    except Exception:
+        logger.warning("image downscale failed for %s", path, exc_info=True)
+        return path
+
+
 def _cleanup_old_files() -> None:
     try:
         now = time.time()
@@ -351,7 +437,7 @@ async def _download_files(event: dict) -> list[str]:
                         continue
                     with open(path, "wb") as fh:
                         fh.write(await resp.read())
-                paths.append(path)
+                paths.append(_shrink_image(path))
             except Exception:
                 logger.warning("file download failed for %s", f.get("id"), exc_info=True)
     return paths
@@ -404,7 +490,7 @@ async def on_mention(event, client, ack=None):
 
 
 @app.event("message")
-async def on_message(event, client, logger_=None):
+async def on_message(event, client):
     """DMs, and follow-up replies inside a thread the bot is already in.
 
     Skips anything that also produced an app_mention (Slack sends both), and
@@ -540,6 +626,55 @@ async def cmd_status(ack, command, client):
         channel=command["channel_id"],
         user=command["user_id"],
         text="*Aktive Sessions*\n" + "\n".join(lines),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Block Kit interactions
+#
+# A button in a payload is dead weight without this: Slack expects an ack
+# within 3 seconds and shows the user a warning otherwise. The click is fed
+# back into the same thread as a normal prompt, so the session continues where
+# the buttons were offered.
+# ---------------------------------------------------------------------------
+
+
+@app.action(re.compile(r".*"))
+async def on_block_action(ack, body, client):
+    await ack()
+
+    user = (body.get("user") or {}).get("id")
+    channel = (body.get("channel") or {}).get("id")
+    if not is_authorized(user, channel):
+        logger.warning("rejected block action from user=%s channel=%s", user, channel)
+        return
+
+    msg = body.get("message") or {}
+    thread_ts = msg.get("thread_ts") or msg.get("ts")
+    if not thread_ts:
+        return
+
+    action = (body.get("actions") or [{}])[0]
+    value = (
+        action.get("value")
+        or (action.get("selected_option") or {}).get("value")
+        or (action.get("selected_options") and action["selected_options"][0].get("value"))
+        or action.get("action_id")
+        or ""
+    )
+    if not value:
+        return
+
+    # Echo the choice so the thread stays readable — otherwise a click leaves
+    # no trace and the next answer looks like it came from nowhere.
+    ts = await _post(
+        client, channel, thread_ts,
+        [{"type": "context", "elements": [
+            {"type": "mrkdwn", "text": f"<@{user}> wählte *{value}*"}]}],
+        value[:120],
+    )
+    asyncio.create_task(
+        _dispatch(client, channel, thread_ts, ts or thread_ts, value)
     )
 
 
