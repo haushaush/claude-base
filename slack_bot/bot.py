@@ -338,6 +338,67 @@ async def _dispatch(client, channel: str, thread_ts: str, user_ts: str, prompt: 
 # ---------------------------------------------------------------------------
 
 
+# Slack screenshots are routinely 2560px wide. Base64-encoded, such a file
+# alone exceeds the SDK's stdio message cap and kills the session — and even
+# when it fits, Claude downscales anything past ~1568px internally, so the
+# extra pixels buy nothing and cost image tokens. Shrink on the way in.
+IMAGE_MAX_EDGE = int(os.environ.get("IMAGE_MAX_EDGE", "1568"))
+IMAGE_MAX_BYTES = int(os.environ.get("IMAGE_MAX_BYTES", str(700 * 1024)))
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+
+
+def _shrink_image(path: str) -> str:
+    """Downscale an image in place. Returns the path to hand to Claude.
+
+    Failure is never fatal: if Pillow is missing or the file is not an image,
+    the original path comes back unchanged and the turn continues.
+    """
+    if os.path.splitext(path)[1].lower() not in _IMAGE_SUFFIXES:
+        return path
+    try:
+        from PIL import Image
+    except ImportError:
+        logger.info("Pillow not installed — image passed through at full size")
+        return path
+
+    try:
+        with Image.open(path) as im:
+            im.load()
+            if getattr(im, "is_animated", False):
+                return path  # leave GIFs alone rather than flattening them
+
+            longest = max(im.size)
+            if longest > IMAGE_MAX_EDGE:
+                ratio = IMAGE_MAX_EDGE / longest
+                im = im.resize(
+                    (max(1, int(im.width * ratio)), max(1, int(im.height * ratio))),
+                    Image.LANCZOS,
+                )
+
+            out = os.path.splitext(path)[0] + "_small.png"
+            im.convert("RGBA" if im.mode in ("RGBA", "LA", "P") else "RGB").save(
+                out, "PNG", optimize=True
+            )
+
+            # Screenshots of text stay legible as JPEG and shrink a lot more.
+            if os.path.getsize(out) > IMAGE_MAX_BYTES:
+                jpg = os.path.splitext(path)[0] + "_small.jpg"
+                im.convert("RGB").save(jpg, "JPEG", quality=85, optimize=True)
+                if os.path.getsize(jpg) < os.path.getsize(out):
+                    os.remove(out)
+                    out = jpg
+
+        logger.info(
+            "image %s: %d KiB -> %s %d KiB",
+            os.path.basename(path), os.path.getsize(path) // 1024,
+            os.path.basename(out), os.path.getsize(out) // 1024,
+        )
+        return out
+    except Exception:
+        logger.warning("image downscale failed for %s", path, exc_info=True)
+        return path
+
+
 def _cleanup_old_files() -> None:
     try:
         now = time.time()
@@ -376,7 +437,7 @@ async def _download_files(event: dict) -> list[str]:
                         continue
                     with open(path, "wb") as fh:
                         fh.write(await resp.read())
-                paths.append(path)
+                paths.append(_shrink_image(path))
             except Exception:
                 logger.warning("file download failed for %s", f.get("id"), exc_info=True)
     return paths
